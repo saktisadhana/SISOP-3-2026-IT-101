@@ -890,10 +890,13 @@ Jika pemain menekan `Ctrl+C`, handler ini memastikan pemain logout terlebih dahu
 #### Output
 
 1. Menjalankan `orion` (Server)
-![Menjalankan orion](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184458.png)
+![Menjalankan orion](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503234925.png)
 
 2. Menjalankan `eternal` (Client)
-![Menjalankan eternal](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184558.png)
+![Menjalankan eternal](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503234835.png)
+
+3. Arena
+![Arena](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503234810.png)
 
 #### Kendala
 
