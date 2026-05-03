@@ -17,56 +17,329 @@ Sesuai dengan struktur folder soal dan juga instruksi dari soal, praktikan harus
 
 ##### protocol.h
 
-##### wired.c
+Header file ini mendefinisikan konstanta, tipe pesan, dan struktur `Message` yang digunakan oleh server dan client.
 
-##### navi.c
+###### Konstanta dan Kredensial Admin
+
+```c
+#define PORT 8080 
+#define MAX_BUFFER 6767
+#define MAX_CLIENTS 67
+#define ADMIN_NAME "The Knights"
+#define ADMIN_PASS "protocol7"
+```
+
+`PORT` menentukan port yang digunakan untuk koneksi TCP. `ADMIN_NAME` dan `ADMIN_PASS` adalah kredensial yang harus digunakan untuk mengakses console admin (RPC). Hanya client yang login dengan nama "The Knights" dan memasukkan password "protocol7" yang bisa mengakses fitur admin.
+
+###### Enum Message Type
+
+```c
+enum msg_type {
+    MSG_LOGIN,          // client send name
+    MSG_LOGIN_OK,       // server: name accepted
+    MSG_LOGIN_FAIL,     // server: name already exists
+    MSG_CHAT,           // normal chat message
+    MSG_EXIT,           // client wants to exit
+    MSG_SYSTEM,         // system message from server
+    MSG_ADMIN_AUTH,     // admin send password
+    MSG_ADMIN_OK,       // admin authentication success
+    MSG_ADMIN_FAIL,     // admin authentication failed
+    MSG_RPC_USERS,      // admin ask for user count
+    MSG_RPC_UPTIME,     // admin ask for uptime
+    MSG_RPC_SHUTDOWN,   // admin ask for shutdown
+    MSG_RPC_RESULT,     // server send RPC result
+    MSG_DISCONNECT      // server disconnect    
+};
+```
+
+Enum ini mendefinisikan seluruh tipe pesan yang bisa dikirim antara server dan client. Penggunaan enum menghindari magic number sehingga kode lebih mudah dibaca.
+
+###### Struktur Message
+
+```c
+typedef struct {
+    int type;           // enum msg_type di atas
+    char sender[67];    // nama pengirim
+    char content[MAX_BUFFER]; // isi pesan
+} Message;
+```
+
+Struct `Message` merupakan "paket" yang dikirim melalui socket. Field `type` menentukan jenis pesan, `sender` berisi nama pengirim, dan `content` berisi isi pesan atau data.
+
+---
+
+##### wired.c (Server)
+
+Server menggunakan `poll()` untuk menangani koneksi multi-client secara asinkron tanpa menggunakan fork atau thread.
+
+###### Setup Server
+
+```c
+server_uptime = time(NULL);
+server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+int option = 1;
+setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+
+struct sockaddr_in address;
+address.sin_family = AF_INET;
+address.sin_addr.s_addr = INADDR_ANY;
+address.sin_port = htons(PORT);
+
+bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+listen(server_fd, MAX_CLIENTS);
+```
+
+Server membuat socket TCP (`SOCK_STREAM`) pada port 8080. `SO_REUSEADDR` diaktifkan agar port bisa langsung dipakai ulang setelah server dimatikan. `INADDR_ANY` berarti server menerima koneksi dari IP manapun.
+
+###### Polling Loop
+
+```c
+fds[0].fd = server_fd;
+fds[0].events = POLLIN;
+
+while(1)
+{
+    int server_activity = poll(fds, nfds, -1);
+    for (int i = 0; i < nfds; i++)
+    {
+        if (fds[i].revents & POLLIN)
+        {
+            if (fds[i].fd == server_fd)
+                handle_newConnection();
+            else
+                handle_clientMessage(i);
+        }
+    }
+}
+```
+
+`poll()` memantau semua file descriptor secara bersamaan. Jika ada event di `server_fd`, berarti ada koneksi baru. Jika event di fd lain, berarti ada pesan dari client.
+
+###### Handle New Connection
+
+```c
+void handle_newConnection()
+{
+    int client_sock = accept(server_fd, ...);
+    if (nfds >= MAX_CLIENTS + 1)
+    {
+        send_msg(client_sock, MSG_SYSTEM, ADMIN_NAME, "Server penuh!");
+        close(client_sock);
+        return;
+    }
+    fds[nfds].fd = client_sock;
+    fds[nfds].events = POLLIN;
+    users[nfds].loggedIn = 0;
+    nfds++;
+}
+```
+
+Saat ada koneksi baru, server meng-`accept` dan menambahkan client ke array `fds[]`. Jika server sudah penuh (`MAX_CLIENTS`), koneksi ditolak.
+
+###### Handle Login
+
+```c
+void handle_login(int poll_index, Message *msg)
+{
+    if (find_by_name(msg->sender) != -1)
+    {
+        send_msg(client_fd, MSG_LOGIN_FAIL, "System",
+                 "The identity '...' is already synchronized in The Wired.");
+        return;
+    }
+    strncpy(users[poll_index].name, msg->sender, ...);
+    users[poll_index].loggedIn = 1;
+    send_msg(client_fd, MSG_LOGIN_OK, "System", "--- Welcome to The Wired ---");
+}
+```
+
+Server memeriksa apakah nama sudah dipakai oleh client lain menggunakan `find_by_name()`. Jika nama unik, login diterima dan client ditandai sebagai `loggedIn = 1`.
+
+###### Handle Chat (Broadcast)
+
+```c
+void handle_chat(int poll_index, Message *msg)
+{
+    for (int i = 1; i < nfds; i++)
+    {
+        if (i != poll_index && users[i].loggedIn)
+            send_msg(fds[i].fd, MSG_CHAT, msg->sender, msg->content);
+    }
+    writeLog("User", log_detail);
+}
+```
+
+Pesan chat di-broadcast ke semua client yang sudah login, kecuali pengirim. Setiap pesan juga dicatat ke `history.log`.
+
+###### Handle Admin Auth & RPC
+
+```c
+void handle_admin_auth(int poll_index, Message *msg)
+{
+    if (strcmp(users[poll_index].name, ADMIN_NAME) != 0) { ... "Access denied" ... }
+    if (strcmp(msg->content, ADMIN_PASS) != 0) { ... "Wrong password" ... }
+    users[poll_index].isAdmin = 1;
+}
+
+void handle_rpc(int poll_index, Message *msg)
+{
+    switch (msg->type)
+    {
+        case MSG_RPC_USERS:    // Hitung user aktif
+        case MSG_RPC_UPTIME:   // Hitung uptime server
+        case MSG_RPC_SHUTDOWN: // Shutdown server + disconnect semua client
+    }
+}
+```
+
+Admin authentication memverifikasi bahwa nama client adalah "The Knights" dan password-nya "protocol7". Setelah autentikasi berhasil, admin bisa menjalankan 3 RPC: cek jumlah user aktif, cek uptime server, dan emergency shutdown.
+
+###### Logging
+
+```c
+void writeLog(const char *category, const char *detail)
+{
+    FILE *f = fopen("history.log", "a");
+    fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] [%s] [%s]\n", ...);
+    fclose(f);
+}
+```
+
+Setiap aktivitas (login, chat, RPC, disconnect) dicatat ke `history.log` dengan format `[timestamp] [category] [detail]`.
+
+---
+
+##### navi.c (Client)
+
+Client menggunakan `poll()` untuk memantau dua sumber input secara bersamaan: stdin (keyboard) dan socket (pesan dari server).
+
+###### Koneksi ke Server
+
+```c
+sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+struct sockaddr_in server_addr;
+server_addr.sin_family = AF_INET;
+server_addr.sin_port = htons(PORT);
+server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+```
+
+Client membuat socket TCP dan terhubung ke server di `127.0.0.1:8080` (localhost).
+
+###### Poll Loop
+
+```c
+struct pollfd fds[2];
+fds[0].fd = STDIN_FILENO; // input dari user
+fds[0].events = POLLIN;
+fds[1].fd = sock_fd;      // pesan dari server
+fds[1].events = POLLIN;
+
+while (1)
+{
+    int activity = poll(fds, 2, -1);
+    if (fds[0].revents & POLLIN) handle_stdin();
+    if (fds[1].revents & POLLIN) handle_server();
+}
+```
+
+`poll()` memantau stdin dan socket sekaligus. Jika user mengetik sesuatu, `handle_stdin()` dipanggil. Jika ada pesan dari server, `handle_server()` dipanggil. Ini memungkinkan client menerima pesan sambil menunggu input.
+
+###### Handle Stdin
+
+```c
+void handle_stdin()
+{
+    if (is_admin)
+    {
+        int choice = atoi(buf);
+        switch (choice)
+        {
+            case 1: send_msg(MSG_RPC_USERS, ...);
+            case 2: send_msg(MSG_RPC_UPTIME, ...);
+            case 3: send_msg(MSG_RPC_SHUTDOWN, ...);
+            case 4: // Disconnect
+        }
+    }
+    else
+    {
+        if (strcmp(buf, "/exit") == 0) { ... disconnect ... }
+        send_msg(MSG_CHAT, my_name, buf);
+    }
+}
+```
+
+Jika client sudah login sebagai admin, input diinterpretasikan sebagai nomor menu RPC. Jika user biasa, input dikirim sebagai chat. Command `/exit` digunakan untuk disconnect.
+
+###### Handle Server Response
+
+```c
+void handle_server()
+{
+    Message msg;
+    recv(sock_fd, &msg, sizeof(Message), 0);
+
+    switch (msg.type)
+    {
+        case MSG_LOGIN_OK:   // Login berhasil
+        case MSG_LOGIN_FAIL: // Nama duplikat, minta nama lagi
+        case MSG_CHAT:       // Tampilkan pesan chat
+        case MSG_ADMIN_OK:   // Admin auth berhasil, tampilkan console
+        case MSG_RPC_RESULT: // Tampilkan hasil RPC
+        case MSG_DISCONNECT: // Server shutdown
+    }
+}
+```
+
+Client memproses respons dari server berdasarkan `msg.type`. Jika login berhasil dan nama adalah "The Knights", client otomatis meminta password admin. Setelah autentikasi berhasil, console admin ditampilkan.
 
 #### Output
 1. Menjalankan `wired.c`
-![[Pasted image 20260503184458.png]]
+![Menjalankan wired](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184458.png)
 
 2. Menjalankan `navi.c` (User Pertama)
-![[Pasted image 20260503184946.png]]
+![User Pertama login](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184946.png)
 
 3. User Pertama terkoneksi
-![[Pasted image 20260503184655.png]]
+![User Pertama terkoneksi](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184655.png)
 
 4. Menjalankan `navi.c` (User Kedua)
-![[Pasted image 20260503185012.png]]
+![User Kedua login](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185012.png)
 
 5. User Kedua terkoneksi
-![[Pasted image 20260503185039.png]]
+![User Kedua terkoneksi](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185039.png)
 
 6. Chat dari user lain
-![[Pasted image 20260503185123.png]]
+![Chat 1](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185123.png)
 
-![[Pasted image 20260503185136.png]]
+![Chat 2](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185136.png)
 
 7. Nama yang sama
-![[Pasted image 20260503185314.png]]
+![Nama duplikat](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185314.png)
 
-8. login to `The Knights`
-![[Pasted image 20260503185543.png]]
+8. Login to `The Knights`
+![Admin login](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185543.png)
 
 9. Opsi 1 console `The Knights`
-![[Pasted image 20260503185840.png]]
+![Opsi 1](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185840.png)
 
 10. Opsi 2 console `The Knights`
-![[Pasted image 20260503185857.png]]
+![Opsi 2](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503185857.png)
 
 11. Opsi 3 console `The Knights`
-![[Pasted image 20260503190006.png]]
+![Opsi 3](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503190006.png)
 
 12. Opsi 4 console `The Knights`
-![[Pasted image 20260503190443.png]]
+![Opsi 4a](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503190443.png)
 
-![[Pasted image 20260503190459.png]]
+![Opsi 4b](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503190459.png)
 
 13. Selain 4 opsi tersebut
-![[Pasted image 20260503190541.png]]
+![Invalid option](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503190541.png)
 
 14. `history.log`
-![[Pasted image 20260503190616.png]]
+![history.log](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503190616.png)
 
 #### Kendala
 
@@ -617,10 +890,10 @@ Jika pemain menekan `Ctrl+C`, handler ini memastikan pemain logout terlebih dahu
 #### Output
 
 1. Menjalankan `orion` (Server)
-![Pasted image 20260503184458.png](Assets/Pasted%20image%2020260503184458.png)
+![Menjalankan orion](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184458.png)
 
 2. Menjalankan `eternal` (Client)
-![Pasted image 20260503184558.png](Assets/Pasted%20image%2020260503184558.png)
+![Menjalankan eternal](https://raw.githubusercontent.com/saktisadhana/SISOP-3-2026-IT-101/main/Assets/Pasted%20image%2020260503184558.png)
 
 #### Kendala
 
